@@ -40,7 +40,8 @@ def process_video(
     height: int = 512,
     scale_factor: int = 2,
     max_frames: Optional[int] = None,
-    ensure_compatibility: bool = True
+    ensure_compatibility: bool = True,
+    tile_overlap: int = 64,
 ) -> None:
     """
     Process a video with RealESRGAN.
@@ -75,7 +76,10 @@ def process_video(
     start_time = time.time()
     
     try:
-        pipeline.process_video(input_path, output_path, max_frames, ensure_compatibility)
+        pipeline.process_video(
+            input_path, output_path, max_frames, ensure_compatibility,
+            tile_width=width, tile_height=height, tile_overlap=tile_overlap,
+        )
         
         total_elapsed = time.time() - start_time
         logger.info(f"Video processing completed in {total_elapsed:.2f} seconds")
@@ -89,12 +93,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="RealESRGAN Video Upscaling")
     parser.add_argument("--input", type=str, required=True, help="Input video path")
     parser.add_argument("--output", type=str, default=None, help="Output video path")
-    parser.add_argument("--width", type=int, default=512, help="Input width (default: 512)")
-    parser.add_argument("--height", type=int, default=512, help="Input height (default: 512)")
+    parser.add_argument("--width", type=int, default=512, help="TensorRT tile width (default: 512)")
+    parser.add_argument("--height", type=int, default=512, help="TensorRT tile height (default: 512)")
     parser.add_argument("--scale", type=int, default=2, choices=[2, 4],
                         help="Upscaling factor (2 or 4)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Maximum number of frames to process")
+    parser.add_argument("--tile-overlap", type=int, default=64,
+                        help="Overlap between TensorRT tiles in input pixels (default: 64)")
     parser.add_argument("--no-compatibility", action="store_true",
                         help="Skip ensuring cloud compatibility of output video")
     
@@ -108,7 +114,8 @@ def main() -> None:
         args.height,
         args.scale,
         args.max_frames,
-        not args.no_compatibility
+        not args.no_compatibility,
+        args.tile_overlap,
     )
 
 if __name__ == "__main__":

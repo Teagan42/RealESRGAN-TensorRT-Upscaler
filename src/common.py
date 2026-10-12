@@ -5,7 +5,6 @@ import torch
 import cv2
 import numpy as np
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 def get_sr_model(model_path: Path = "./src/models/pretrained_models/RealESRGAN_x2plus.pth", is_2x: bool = True):
     
@@ -22,6 +21,12 @@ def get_sr_model(model_path: Path = "./src/models/pretrained_models/RealESRGAN_x
     return model
 
 def show(x: torch.Tensor):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib is not installed; skipping the visualization.")
+        return
+
     print(x.shape)
     x = x[0].clip(0, 1).cpu().detach().numpy().transpose(1, 2, 0).astype(np.float32)
     plt.imshow(x)

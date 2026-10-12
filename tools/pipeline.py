@@ -106,9 +106,65 @@ class RealESRGANPipeline:
         x = self.preprocess_frame(frame)
         y = self.run_inference(x)
         return self.postprocess(y)
+
+    @staticmethod
+    def _tile_starts(length: int, tile_size: int, overlap: int) -> List[int]:
+        if length <= tile_size:
+            return [0]
+        count = int(np.ceil((length - tile_size) / (tile_size - overlap))) + 1
+        return [round(i * (length - tile_size) / (count - 1)) for i in range(count)]
+
+    @staticmethod
+    def _tile_weights(index: int, starts: List[int], tile_size: int, scale: int) -> np.ndarray:
+        weights = np.ones(tile_size * scale, dtype=np.float32)
+        start = starts[index]
+        if index > 0:
+            overlap = (starts[index - 1] + tile_size - start) * scale
+            weights[:overlap] *= np.linspace(0.0, 1.0, overlap, endpoint=False, dtype=np.float32)
+        if index + 1 < len(starts):
+            overlap = (start + tile_size - starts[index + 1]) * scale
+            weights[-overlap:] *= np.linspace(1.0, 0.0, overlap, endpoint=False, dtype=np.float32)
+        return weights
+
+    def process_frame_tiled(
+        self, frame: np.ndarray, tile_width: int, tile_height: int, overlap: int = 64
+    ) -> np.ndarray:
+        """Upscale a frame in overlapping fixed-size TensorRT tiles."""
+        if tile_width <= 0 or tile_height <= 0:
+            raise ValueError("Tile dimensions must be positive")
+        if overlap < 0 or overlap >= min(tile_width, tile_height):
+            raise ValueError("Tile overlap must be non-negative and smaller than both tile dimensions")
+
+        height, width = frame.shape[:2]
+        pad_h, pad_w = max(0, tile_height - height), max(0, tile_width - width)
+        if pad_h or pad_w:
+            frame = cv2.copyMakeBorder(frame, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+        padded_h, padded_w = frame.shape[:2]
+        ys = self._tile_starts(padded_h, tile_height, overlap)
+        xs = self._tile_starts(padded_w, tile_width, overlap)
+        out_h, out_w = height * self.scale_factor, width * self.scale_factor
+        accumulated = np.zeros((out_h, out_w, 3), dtype=np.float32)
+        weight_sum = np.zeros((out_h, out_w, 1), dtype=np.float32)
+        y_weights = [self._tile_weights(i, ys, tile_height, self.scale_factor) for i in range(len(ys))]
+        x_weights = [self._tile_weights(i, xs, tile_width, self.scale_factor) for i in range(len(xs))]
+
+        for yi, y in enumerate(ys):
+            for xi, x in enumerate(xs):
+                tile = frame[y:y + tile_height, x:x + tile_width]
+                result = self.process_frame(tile).astype(np.float32)
+                weight = y_weights[yi][:, None] * x_weights[xi][None, :]
+                y0, x0 = y * self.scale_factor, x * self.scale_factor
+                y1, x1 = min(y0 + result.shape[0], out_h), min(x0 + result.shape[1], out_w)
+                result = result[:y1 - y0, :x1 - x0]
+                weight = weight[:y1 - y0, :x1 - x0, None]
+                accumulated[y0:y1, x0:x1] += result * weight
+                weight_sum[y0:y1, x0:x1] += weight
+
+        return (accumulated / np.maximum(weight_sum, 1e-8)).clip(0, 255).astype(np.uint8)
     
     def process_video(self, input_path: Union[str, Path], output_path: Union[str, Path], 
-                     max_frames: Optional[int] = None, ensure_compatibility: bool = True) -> None:
+                     max_frames: Optional[int] = None, ensure_compatibility: bool = True,
+                     tile_width: int = 512, tile_height: int = 512, tile_overlap: int = 64) -> None:
         """
         Process a complete video file
         
@@ -152,7 +208,7 @@ class RealESRGANPipeline:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                result = self.process_frame(frame)
+                result = self.process_frame_tiled(frame, tile_width, tile_height, tile_overlap)
                 if result.shape[:2] != (height * self.scale_factor, width * self.scale_factor):
                     raise ValueError(
                         f"Model output is {result.shape[1]}x{result.shape[0]}, expected "

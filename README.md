@@ -50,19 +50,18 @@ docker compose build
 docker compose run --rm upscaler
 ```
 
-The container includes CUDA 12.1, TensorRT 8.6, `torch2trt`, and FFmpeg. The Compose service exposes available NVIDIA GPUs and mounts `./data` at `/work` for input and output files. Inside the container, convert an engine for the input frame dimensions and run the video upscaler, for example:
+The container includes CUDA 12.1, TensorRT 8.6, `torch2trt`, and FFmpeg. The Compose service exposes available NVIDIA GPUs and mounts `./data` at `/work` for input and output files. Inside the container, build a fixed-size tile engine and use that same tile size for video inference, for example:
 
 ```bash
-python convert_trt.py --width 1920 --height 816 --pretrained_model 2
-python inference_video.py --input /work/movie.mkv --output /work/movie_2x.mp4 --width 1920 --height 816 --scale 2
+python convert_trt.py --width 512 --height 512 --pretrained_model 2
+python inference_video.py --input /work/movie.mkv --output /work/movie_2x.mp4 --width 512 --height 512 --scale 2
 ```
 
-TensorRT engines are built for the GPU visible during conversion. If the host has multiple GPUs, select the desired card when starting Compose by setting `CUDA_VISIBLE_DEVICES` in the container environment or by narrowing the devices exposed by the NVIDIA Container Toolkit.
-
-For example, select the GPU reported as index `1` inside the container:
+`convert_trt.py` downloads the official pretrained checkpoint automatically when it is missing and saves it under `src/models/pretrained_models/`. Build a modest fixed-size engine (512×512 is a good starting point for a 6 GB GPU); video inference applies it to the full-resolution movie in overlapping tiles. If engine conversion still runs out of memory, try a smaller engine such as 256×256 and use the same dimensions for `inference_video.py`. TensorRT engines are built for the GPU visible during conversion. Compose exposes the host GPUs to the container; inspect their container-visible indexes with `nvidia-smi -L`. If needed, select a container-visible GPU index for one command with:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 docker compose run --rm upscaler
+docker compose run --rm -e CUDA_VISIBLE_DEVICES=0 upscaler \
+  python convert_trt.py --width 512 --height 512 --pretrained_model 2
 ```
 
 The `.dockerignore` file keeps model weights, generated engines, sample media, and Git history out of the build context. Those model and engine files remain available at runtime through the mounted project directory.

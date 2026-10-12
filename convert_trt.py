@@ -1,8 +1,39 @@
 import argparse
 import os
+import shutil
 import torch
+from pathlib import Path
+from urllib.request import Request, urlopen
 from torch2trt import torch2trt
 from src.common import prepare, test
+
+
+PRETRAINED_MODEL_URLS = {
+    "2": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+    "4": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+}
+
+
+def ensure_pretrained_model(model_file: Path, scale: str) -> None:
+    """Download the official checkpoint when it is not already present."""
+    if model_file.is_file():
+        return
+
+    model_file.parent.mkdir(parents=True, exist_ok=True)
+    partial_file = model_file.with_suffix(model_file.suffix + ".part")
+    request = Request(PRETRAINED_MODEL_URLS[scale], headers={"User-Agent": "RealESRGAN-TensorRT-Upscaler"})
+
+    print(f"Pretrained model not found. Downloading {model_file.name}...")
+    try:
+        with urlopen(request, timeout=60) as response, partial_file.open("wb") as destination:
+            shutil.copyfileobj(response, destination)
+        if partial_file.stat().st_size < 1_000_000:
+            raise RuntimeError("Downloaded checkpoint is unexpectedly small; the download may have failed.")
+        os.replace(partial_file, model_file)
+        print(f"Downloaded pretrained model to {model_file}")
+    except Exception:
+        partial_file.unlink(missing_ok=True)
+        raise
 
 def main():
     # Argument parser
@@ -20,23 +51,26 @@ def main():
     side = (args.width,args.height )
 
     # Check pretrained model path
-    model_file = f"./src/models/pretrained_models/RealESRGAN_x{args.pretrained_model.lower()}plus.pth"
-    if not os.path.isfile(model_file):
-        print(f"[ERROR] Pretrained model not found: {model_file}")
-        print("Please place the correct model file in './src/models/pretrained_models/'")
-        return
+    model_file = Path(f"./src/models/pretrained_models/RealESRGAN_x{args.pretrained_model}plus.pth")
+    ensure_pretrained_model(model_file, args.pretrained_model)
 
     # Prepare model
     is_2x = False
     if args.pretrained_model.lower() == "2":
         is_2x = True
         
-    model, x = prepare(side, model_file, is_2x)
+    model, x = prepare(side, str(model_file), is_2x)
 
     torch.cuda.empty_cache()
     with torch.no_grad():
         print("Converting to TensorRT...")
         model_trt = torch2trt(model, [x], fp16_mode=True)
+
+    if model_trt is None or getattr(model_trt, "engine", None) is None:
+        raise RuntimeError(
+            "TensorRT did not create an engine. The GPU ran out of memory during conversion; "
+            "retry with smaller --width and --height values, such as 512x512 or 256x256."
+        )
 
     # Ensure output directory exists
     os.makedirs(args.model_output_directory, exist_ok=True)
