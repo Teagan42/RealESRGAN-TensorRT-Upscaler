@@ -19,9 +19,10 @@ This project provides a high-performance image and video upscaler using [RealESR
 - 📦 **Static TensorRT engine**: optimized for fixed input sizes  
   ↪️ *To change input size, re-export the engine*
 
-### 🧪 In Development (Upcoming Features)
-- 🔁 **Dynamic TensorRT**: handle varying input sizes without re-export
-- 🔊 **Audio transfer** support: for full video enhancement pipelines
+### 🎞️ Video Processing
+- Frames are decoded, upscaled, and encoded one at a time, so memory use stays bounded for long videos
+- Source audio is retained and encoded as AAC in the output
+- Requires FFmpeg with `libx264` support on the machine running video inference
 
 ---
 
@@ -39,6 +40,32 @@ This project provides a high-performance image and video upscaler using [RealESR
 ---
 
 ## ⚙️ Installation
+
+### Docker (NVIDIA GPU)
+
+Install Docker Compose and the NVIDIA Container Toolkit on the host. Place the pretrained model weights in `src/models/pretrained_models/`, then build the image and open a shell:
+
+```bash
+docker compose build
+docker compose run --rm upscaler
+```
+
+The container includes CUDA 12.1, TensorRT 8.6, `torch2trt`, and FFmpeg. The Compose service exposes available NVIDIA GPUs and mounts `./data` at `/work` for input and output files. Inside the container, convert an engine for the input frame dimensions and run the video upscaler, for example:
+
+```bash
+python convert_trt.py --width 1920 --height 816 --pretrained_model 2
+python inference_video.py --input /work/movie.mkv --output /work/movie_2x.mp4 --width 1920 --height 816 --scale 2
+```
+
+TensorRT engines are built for the GPU visible during conversion. If the host has multiple GPUs, select the desired card when starting Compose by setting `CUDA_VISIBLE_DEVICES` in the container environment or by narrowing the devices exposed by the NVIDIA Container Toolkit.
+
+For example, select the GPU reported as index `1` inside the container:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 docker compose run --rm upscaler
+```
+
+The `.dockerignore` file keeps model weights, generated engines, sample media, and Git history out of the build context. Those model and engine files remain available at runtime through the mounted project directory.
 
 ### 1. Install TensorRT
 
@@ -159,6 +186,8 @@ Process videos with different scaling factors:
 python inference_video.py --input src/samples/input.mp4 --output src/samples/output_x2.mp4 --scale 2
 python inference_video.py --input src/samples/input.mp4 --output src/samples/output_x4.mp4 --scale 4
 ```
+
+Video processing requires the `ffmpeg` executable to be installed and available on `PATH`. The pipeline streams frames through inference and FFmpeg instead of accumulating decoded and upscaled frames in RAM. It keeps the source audio (when present) and writes H.264 video with AAC audio for broad playback compatibility. Use `--max-frames N` to process only the first N frames.
 
 ---
 

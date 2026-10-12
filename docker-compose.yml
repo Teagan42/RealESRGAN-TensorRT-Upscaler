@@ -1,0 +1,17 @@
+services:
+  upscaler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: realesrgan-tensorrt-upscaler:local
+    working_dir: /opt/Real-ESRGAN
+    stdin_open: true
+    tty: true
+    gpus: all
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-}
+    volumes:
+      - ./:/opt/Real-ESRGAN
+      - ./data:/work
+    command: ["bash"]

@@ -118,28 +118,87 @@ class RealESRGANPipeline:
             max_frames: Maximum number of frames to process (None for all)
             ensure_compatibility: Whether to ensure cloud compatibility
         """
-        # Extract frames
-        frames, fps, width, height = self.extract_frames_from_video(input_path, max_frames)
-        logger.info(f"Extracted {len(frames)} frames from video")
-        
-        # Process each frame
-        processed_frames = []
-        total_frames = len(frames)
-        
-        for i, frame in enumerate(frames):
-            
-            processed_frame = self.process_frame(frame)
-            processed_frames.append(processed_frame)
-        
-        # Create output video
-        new_width = width * self.scale_factor
-        new_height = height * self.scale_factor
-        
-        self.make_video_from_frames(processed_frames, str(output_path), fps, new_width, new_height)
-        
-        # Ensure cloud compatibility if requested
-        if ensure_compatibility:
-            self.ensure_cloud_compatible_video(str(output_path))
+        input_path, output_path = Path(input_path), Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cap = cv2.VideoCapture(str(input_path))
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {input_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if not np.isfinite(fps) or fps <= 0 or width <= 0 or height <= 0:
+            cap.release()
+            raise ValueError(f"Video has invalid metadata: {input_path}")
+
+        frame_limit = max_frames if max_frames is not None else float("inf")
+        silent_path = output_path.with_name(output_path.stem + ".video-only.mp4")
+        mux_path = output_path.with_name(output_path.stem + ".muxed" + output_path.suffix)
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width * self.scale_factor}x{height * self.scale_factor}",
+            "-r", str(fps), "-i", "-", "-an", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(silent_path),
+        ]
+        try:
+            ffmpeg = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError:
+            cap.release()
+            raise
+        count = 0
+        try:
+            while count < frame_limit:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                result = self.process_frame(frame)
+                if result.shape[:2] != (height * self.scale_factor, width * self.scale_factor):
+                    raise ValueError(
+                        f"Model output is {result.shape[1]}x{result.shape[0]}, expected "
+                        f"{width * self.scale_factor}x{height * self.scale_factor}"
+                    )
+                assert ffmpeg.stdin is not None
+                ffmpeg.stdin.write(result.tobytes())
+                count += 1
+                if count % 100 == 0:
+                    logger.info("Processed %d frames", count)
+        except BaseException:
+            if ffmpeg.stdin:
+                ffmpeg.stdin.close()
+            ffmpeg.kill()
+            ffmpeg.wait()
+            silent_path.unlink(missing_ok=True)
+            raise
+        finally:
+            cap.release()
+        assert ffmpeg.stdin is not None
+        ffmpeg.stdin.close()
+        error = ffmpeg.stderr.read() if ffmpeg.stderr else b""
+        if ffmpeg.wait() != 0:
+            silent_path.unlink(missing_ok=True)
+            raise RuntimeError(f"FFmpeg video encoding failed: {error.decode(errors='replace')}")
+        if count == 0:
+            silent_path.unlink(missing_ok=True)
+            raise ValueError(f"No frames could be decoded from {input_path}")
+
+        # Re-encode audio to AAC for broad compatibility; optional mapping allows
+        # silent source videos to work. Limit both streams to the frames written.
+        mux_command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(silent_path), "-i", str(input_path),
+            "-map", "0:v:0", "-map", "1:a?", "-c:v", "copy", "-c:a", "aac",
+            "-t", f"{count / fps:.9f}", "-movflags", "+faststart", str(mux_path),
+        ]
+        try:
+            result = subprocess.run(mux_command, capture_output=True, text=True, check=False)
+            if result.returncode:
+                raise RuntimeError(f"FFmpeg audio mux failed: {result.stderr.strip()}")
+            os.replace(mux_path, output_path)
+        finally:
+            silent_path.unlink(missing_ok=True)
+            mux_path.unlink(missing_ok=True)
+        logger.info("Processed %d frames; output with source audio saved to %s", count, output_path)
 
     @staticmethod
     def extract_frames_from_video(video_path: Union[str, Path], 
